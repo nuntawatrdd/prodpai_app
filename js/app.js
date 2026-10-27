@@ -471,13 +471,9 @@
       btn.addEventListener('click', function () { setFilter(btn.getAttribute('data-filter')); });
     });
 
-    var searchTimer = null;
     els.search.addEventListener('input', function () {
-      window.clearTimeout(searchTimer);
-      searchTimer = window.setTimeout(function () {
-        state.query = els.search.value;
-        renderList();
-      }, 120);
+      state.query = els.search.value;
+      renderList();
     });
 
     els.sort.addEventListener('change', function () {
