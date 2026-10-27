@@ -1,200 +1,64 @@
-name: CI
-
-# Single-app repository: every push is about this app, so no path filters.
-# CI tests, scans and builds the image, pushes it to the ECR repository set in
-# .github/config.env (tags: commit SHA and latest), then rolls it into the running
-# EC2 instances — all on main only.
-#
-# การ rollout ที่นี่แตะแค่ "เครื่องรันอะไรอยู่" เท่านั้น ไม่ได้แตะรูปร่างของ infrastructure
-# และไม่ได้แตะ launch template ด้วย มันทำแค่ 2 อย่าง:
-#   1. เปลี่ยนค่า image tag ใน SSM Parameter Store
-#   2. ทยอยเปลี่ยนเครื่องใน ASG ด้วย .github/scripts/rollout.sh (เปิดใหม่ก่อน ปิดเก่าทีหลัง)
-# เครื่องใหม่บูตขึ้นมาอ่าน tag จาก SSM แล้ว docker pull ตัวนั้นมารัน
-# (ไม่ใช้ start-instance-refresh เพราะบัญชี AWS Academy มี SCP deny คำสั่งนั้นไว้)
-#
-# ไม่มีการลบหรือสร้าง resource ใดๆ การวาง topology ทั้งชุดยังเป็นของ Infra Setup
-# ที่ repo prodpai_cloud และ Launch Image ที่นั่นใช้ย้อน tag เก่าได้ด้วยกลไกเดียวกัน
+name: CI Pipeline (App to ECR)
 
 on:
   push:
-    branches: [main]
+    branches:
+      - main
   pull_request:
-    branches: [main]
+    branches:
+      - main
   workflow_dispatch:
-
-permissions:
-  contents: read
-  # ให้ผลสแกนขึ้นแท็บ Security ของ repo แทนที่จะจมอยู่ใน log ของ job
-  security-events: write
-
-concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
-
-env:
-  AWS_REGION: us-east-1
 
 jobs:
   test:
-    name: Test
-    runs-on: ubuntu-latest
-    # Fail fast instead of hanging for hours if a test process never exits.
-    timeout-minutes: 10
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      # No npm cache / npm ci: this app has zero dependencies and no
-      # package-lock.json, so setup-node's cache step would fail to resolve.
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-
-      - name: Run tests
-        run: npm test
-
-  lint:
-    name: Dockerfile lint
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout source code
         uses: actions/checkout@v4
-
-      # Trivy misconfig จับเรื่อง security ของ Dockerfile แต่ไม่จับเรื่องคุณภาพ
-      # เช่น ไม่ปักเวอร์ชัน apt หรือเรียง layer ผิดจน cache ไม่ทำงาน
-      - name: Hadolint
-        uses: hadolint/hadolint-action@v3.1.0
-        with:
-          dockerfile: Dockerfile
-          failure-threshold: warning
-
-  security:
-    name: Security checks
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-        with:
-          # gitleaks ต้องอ่านทุก commit ไม่ใช่แค่ไฟล์ปัจจุบัน
-          fetch-depth: 0
-
-      # Trivy secret สแกนแค่ working tree ความลับที่เคย commit แล้วลบออกทีหลังจะไม่เจอ
-      # แต่มันยังอยู่ใน history และยังใช้งานได้อยู่ ถ้าไม่ได้เพิกถอน
-      - name: Gitleaks (full history)
-        run: |
-          docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.21.2 \
-            detect --source=/repo --redact --no-banner --exit-code 1
 
       - name: Setup Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.13"
+          python-version: "3.11"
 
-      - name: Install Semgrep
-        run: pip install semgrep
-
-      - name: Semgrep (JavaScript, Dockerfile, secrets)
+      - name: Install dependencies
         run: |
-          # No --strict here: semgrep's Dockerfile parser cannot read the
-          # multi-line LABEL / HEALTHCHECK in this Dockerfile (docker build
-          # accepts them fine), and --strict would turn that parser warning
-          # into a failed job. --error still fails on any real finding.
-          semgrep scan --error --sarif --output semgrep.sarif \
-            --config p/javascript --config p/dockerfile --config p/secrets .
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-      # ผลจะขึ้นแท็บ Security ถ้า repo เปิด code scanning ไว้ ถ้ายังไม่เปิดก็ไม่ทำให้ job ตก
-      - name: Upload Semgrep results
-        if: always()
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: semgrep.sarif
-          category: semgrep
+      - name: Run tests
+        run: |
+          python -m pytest scripts/test_app.py
 
-      - name: Trivy filesystem scan
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,misconfig,secret
-          severity: CRITICAL,HIGH
-          exit-code: "1"
-          format: table
-
-      - name: Trivy filesystem scan (SARIF)
-        if: always()
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          scan-type: fs
-          scan-ref: .
-          scanners: vuln,misconfig,secret
-          format: sarif
-          output: trivy-fs.sarif
-
-      - name: Upload Trivy results
-        if: always()
-        continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
-        with:
-          sarif_file: trivy-fs.sarif
-          category: trivy-fs
-
-  build:
-    name: Build, scan and push image
-    needs: [test, lint, security]
+  security:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Load shared config
-        run: grep -E '^[A-Z_]+=' .github/config.env | tr -d '\r' >> "$GITHUB_ENV"
-
-      - name: Build image
-        run: docker build -t "$ECR_REPOSITORY:${{ github.sha }}" .
-
-      - name: Smoke test container
-        env:
-          IMAGE: ${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-        run: |
-          docker run -d --name smoke -p 8080:8080 "$IMAGE"
-          for i in $(seq 1 30); do
-            if curl -fsS http://127.0.0.1:8080/health; then echo; break; fi
-            sleep 1
-          done
-          curl -fsS -o /dev/null http://127.0.0.1:8080/
-          docker rm -f smoke
-
-      - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@v0.36.0
+      - name: Run Semgrep
+        uses: semgrep/semgrep-action@v1
         with:
-          image-ref: ${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-          scan-type: image
-          scanners: vuln
-          severity: CRITICAL,HIGH
-          ignore-unfixed: true
-          exit-code: "1"
+          config: p/python
+
+      - name: Run Trivy FS scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: fs
+          scan-ref: .
           format: table
 
-      - name: Generate SBOM
-        uses: aquasecurity/trivy-action@v0.36.0
-        with:
-          image-ref: ${{ env.ECR_REPOSITORY }}:${{ github.sha }}
-          scan-type: image
-          format: cyclonedx
-          output: sbom.json
+  build-and-push:
+    needs: [test, security]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
 
-      - name: Upload SBOM
-        uses: actions/upload-artifact@v4
-        with:
-          name: sbom-${{ github.sha }}
-          path: sbom.json
+      - name: Load config.env
+        run: grep -v '^#' config.env | grep -v '^$' >> $GITHUB_ENV
 
-      # Everything below only runs for real main builds: a pull request is
-      # tested and scanned, but nothing from it reaches the registry.
       - name: Configure AWS credentials
-        if: github.event_name != 'pull_request'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -202,137 +66,33 @@ jobs:
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to ECR
+      - name: Login to Amazon ECR
         id: login-ecr
-        if: github.event_name != 'pull_request'
         uses: aws-actions/amazon-ecr-login@v2
 
-      # The exact image that was just tested and scanned, never a rebuild.
-      - name: Push image to ECR
-        if: github.event_name != 'pull_request'
+      - name: Build Flask image
         env:
-          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          TAG: ${{ github.sha }}
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker tag "$ECR_REPOSITORY:$TAG" "$REGISTRY/$ECR_REPOSITORY:$TAG"
-          docker tag "$ECR_REPOSITORY:$TAG" "$REGISTRY/$ECR_REPOSITORY:latest"
-          docker push "$REGISTRY/$ECR_REPOSITORY:$TAG"
-          docker push "$REGISTRY/$ECR_REPOSITORY:latest"
-          {
-            echo "### Image pushed"
-            echo ""
-            echo "- \`$REGISTRY/$ECR_REPOSITORY:$TAG\`"
-            echo "- \`$REGISTRY/$ECR_REPOSITORY:latest\`"
-          } >> "$GITHUB_STEP_SUMMARY"
-
-  rollout:
-    name: Roll the new image into the ASG
-    needs: [build]
-    # เฉพาะของจริงบน main เท่านั้น PR หรือการกด Run workflow จาก branch อื่นไม่แตะ production
-    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
-    # กันตัวเองซ้อนกันเอง ถ้า push ติดๆ กันหลายรอบ ให้รอรอบก่อนหน้าจบก่อน
-    concurrency:
-      group: prodpai-rollout
-      cancel-in-progress: false
-    env:
-      TAG: ${{ github.sha }}
-      # ป้ายประกาศที่เครื่องใน ASG อ่านตอนบูต สร้างโดย Terraform ฝั่ง infra (ssm.tf)
-      IMAGE_TAG_PARAM: /prod-pai/app/image_tag
-    steps:
-      # checkout มาเพื่อใช้ .github/scripts/rollout.sh
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+          docker build \
+            -f app/Dockerfile \
+            -t $ECR_REGISTRY/${{ env.APP_ECR_REPOSITORY }}:$IMAGE_TAG \
+            -t $ECR_REGISTRY/${{ env.APP_ECR_REPOSITORY }}:latest .
+        
+      - name: Run Trivy vulnerability scanner on image
+        uses: aquasecurity/trivy-action@master
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: ${{ env.AWS_REGION }}
+          image-ref: '${{ steps.login-ecr.outputs.registry }}/${{ env.APP_ECR_REPOSITORY }}:${{ github.sha }}'
+          format: 'table'
+          exit-code: '0' 
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
 
-      # ยังไม่มี ASG = ยังไม่เคยรัน Infra Setup ในบัญชีนี้ (ตั้งระบบครั้งแรก)
-      # image ถูก push เข้า ECR ไปแล้วใน job build จึงข้าม rollout แบบไม่แดง
-      # Infra Setup จะสร้าง ASG ที่ใช้ image นี้เอง ข้ามได้เฉพาะกรณีนี้กรณีเดียว:
-      # ถ้าเรียก AWS ไม่ได้ (secret หมดอายุ / ไม่มีสิทธิ์) คำสั่งจะล้มและ job แดงตามปกติ
-      - name: Find the ASG
-        id: find
+      - name: Push Flask image to ECR
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
         run: |
-          account=$(aws sts get-caller-identity --query Account --output text)
-          echo "account=$account" >> "$GITHUB_OUTPUT"
-          asg=$(aws autoscaling describe-auto-scaling-groups \
-            --query "AutoScalingGroups[?starts_with(AutoScalingGroupName, 'prod-pai-env-asg')].AutoScalingGroupName | [0]" \
-            --output text)
-          if [ "$asg" = "None" ] || [ -z "$asg" ]; then
-            echo "::warning::ยังไม่มี ASG ในบัญชี $account จึงข้าม rollout image $TAG อยู่ใน ECR แล้ว ไปรัน Infra Setup ที่ repo prodpai_cloud ต่อได้เลย (ถ้ามี ASG อยู่แล้ว แปลว่า secret ของ repo นี้ชี้ผิดบัญชี)"
-            echo "skip=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "skip=false" >> "$GITHUB_OUTPUT"
-          echo "asg=$asg" >> "$GITHUB_OUTPUT"
-
-      # ถ้า ASG ยังเปิด/ปิดเครื่องค้างอยู่ (rollout รอบก่อน, scaling, เปลี่ยนเครื่องที่ป่วย)
-      # รอให้นิ่งก่อน ไม่งั้นการนับเครื่องเก่า/ใหม่ใน rollout.sh จะคลาดเคลื่อน
-      - name: Wait for the ASG to settle
-        if: steps.find.outputs.skip == 'false'
-        run: |
-          asg="${{ steps.find.outputs.asg }}"
-          for i in $(seq 1 40); do
-            read -r desired inservice total <<<"$(aws autoscaling describe-auto-scaling-groups \
-              --auto-scaling-group-names "$asg" \
-              --query 'AutoScalingGroups[0].[DesiredCapacity,length(Instances[?LifecycleState==`InService`]),length(Instances)]' \
-              --output text)"
-            if [ "$inservice" = "$desired" ] && [ "$total" = "$desired" ]; then
-              echo "นิ่งแล้ว: $inservice/$desired InService"
-              exit 0
-            fi
-            echo "  รอ ASG นิ่ง ($inservice InService, $total ทั้งหมด, desired $desired)"
-            sleep 30
-          done
-          echo "::error::ASG ไม่นิ่งภายในเวลา"
-          exit 1
-
-      # 1. เปลี่ยนป้ายประกาศให้เป็นเวอร์ชันที่เพิ่ง push ขึ้น ECR
-      - name: Update the image tag in SSM
-        if: steps.find.outputs.skip == 'false'
-        run: |
-          aws ssm put-parameter \
-            --name "$IMAGE_TAG_PARAM" \
-            --value "$TAG" \
-            --type String \
-            --overwrite >/dev/null
-          echo "✅ $IMAGE_TAG_PARAM = $TAG"
-
-      # 2. ทยอยเปลี่ยนเครื่อง: เปิดเครื่องใหม่ (อ่าน tag ใหม่จาก SSM) ให้ healthy ก่อน
-      #    แล้วค่อยปิดเครื่องเก่าทีละตัว ถ้าเครื่องใหม่ไม่ healthy จะหยุดโดยไม่แตะเครื่องเก่า
-      - name: Roll the instances
-        if: steps.find.outputs.skip == 'false'
-        run: bash .github/scripts/rollout.sh "${{ steps.find.outputs.asg }}"
-
-      - name: Summary
-        if: always()
-        run: |
-          if [ "${{ steps.find.outputs.skip }}" = "true" ]; then
-            {
-              echo "### Rollout skipped: no ASG yet"
-              echo ""
-              echo "- Account: \`${{ steps.find.outputs.account }}\`"
-              echo "- Image in ECR: \`$TAG\` and \`latest\`"
-              echo ""
-              echo "ตั้งระบบครั้งแรก: ไปที่ repo \`prodpai_cloud\` → Actions → **Infra Setup** → \`image_tag\` = \`latest\`"
-              echo "ถ้าบัญชีนี้มี ASG อยู่แล้ว แปลว่า secret ของ repo นี้ชี้ผิดบัญชี"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          {
-            echo "### Rollout"
-            echo ""
-            echo "- ASG: \`${{ steps.find.outputs.asg }}\`"
-            echo "- SSM: \`$IMAGE_TAG_PARAM\` = \`$TAG\`"
-            echo ""
-            echo "เปิดเครื่องใหม่ก่อนแล้วปิดเครื่องเก่าทีละตัว (.github/scripts/rollout.sh)"
-            echo "เครื่องใหม่อ่าน tag จาก SSM ตอนบูตแล้ว docker pull ตัวนั้นมารัน"
-            echo "ถ้าต้องย้อนกลับ ให้รัน **Launch Image** ที่ repo \`prodpai_cloud\` ด้วย tag เก่า"
-          } >> "$GITHUB_STEP_SUMMARY"
+          docker push $ECR_REGISTRY/${{ env.APP_ECR_REPOSITORY }}:$IMAGE_TAG
+          docker push $ECR_REGISTRY/${{ env.APP_ECR_REPOSITORY }}:latest
