@@ -1,4 +1,4 @@
-name: CI Pipeline (App to ECR)
+name: CI Pipeline
 
 on:
   push:
@@ -12,23 +12,18 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    timeout-minutes: 10 # ป้องกัน Browser เทสต์ค้างตามที่ README แนะนำ
     steps:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
         with:
-          python-version: "3.11"
+          node-version: '22'
 
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Run tests
-        run: |
-          python -m pytest scripts/test_app.py
+      - name: Run tests (Unit, Static, E2E)
+        run: npm test
 
   security:
     runs-on: ubuntu-latest
@@ -36,10 +31,13 @@ jobs:
       - name: Checkout source code
         uses: actions/checkout@v4
 
-      - name: Run Semgrep
+      - name: Run Semgrep (JS, Docker, Secrets)
         uses: semgrep/semgrep-action@v1
         with:
-          config: p/python
+          config: >-
+            p/javascript
+            p/dockerfile
+            p/secrets
 
       - name: Run Trivy FS scanner
         uses: aquasecurity/trivy-action@master
@@ -47,8 +45,10 @@ jobs:
           scan-type: fs
           scan-ref: .
           format: table
+          exit-code: 1 # บังคับพังถ้าเจอ CRITICAL/HIGH
+          severity: 'CRITICAL,HIGH'
 
-  build-and-push:
+  build-scan-push:
     needs: [test, security]
     runs-on: ubuntu-latest
     steps:
@@ -56,7 +56,8 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Load config.env
-        run: grep -v '^#' config.env | grep -v '^$' >> $GITHUB_ENV
+        # อ่านจากโฟลเดอร์ .github/config.env ตามโครงสร้าง Directory
+        run: grep -v '^#' .github/config.env | grep -v '^$' >> $GITHUB_ENV
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -64,35 +65,48 @@ jobs:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region: ${{ env.AWS_REGION }}
+          aws-region: us-east-1
 
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Build Flask image
+      - name: Build Docker Image
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
           docker build \
-            -f app/Dockerfile \
-            -t $ECR_REGISTRY/${{ env.APP_ECR_REPOSITORY }}:$IMAGE_TAG \
-            -t $ECR_REGISTRY/${{ env.APP_ECR_REPOSITORY }}:latest .
-        
-      - name: Run Trivy vulnerability scanner on image
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: '${{ steps.login-ecr.outputs.registry }}/${{ env.APP_ECR_REPOSITORY }}:${{ github.sha }}'
-          format: 'table'
-          exit-code: '0' 
-          ignore-unfixed: true
-          severity: 'CRITICAL,HIGH'
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG \
+            -t $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest .
 
-      - name: Push Flask image to ECR
+      # Smoke Test: ลองรัน Container จริงและยิง Curl ทดสอบก่อน Push (ตาม README)
+      - name: Smoke Test (/health and /)
         env:
           ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
           IMAGE_TAG: ${{ github.sha }}
         run: |
-          docker push $ECR_REGISTRY/${{ env.APP_ECR_REPOSITORY }}:$IMAGE_TAG
-          docker push $ECR_REGISTRY/${{ env.APP_ECR_REPOSITORY }}:latest
+          docker run -d --name smoke-test -p 8080:8080 $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+          sleep 3
+          curl -f -i http://localhost:8080/health
+          curl -f -I http://localhost:8080/
+          docker rm -f smoke-test
+
+      - name: Run Trivy Image scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: '${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ github.sha }}'
+          format: 'table'
+          exit-code: 0
+          ignore-unfixed: true
+          severity: 'CRITICAL,HIGH'
+
+      # เงื่อนไข: ถ้าเป็น Pull Request จะสแกนอย่างเดียว ไม่ดันขึ้น AWS (ตาม README)
+      - name: Push Image to ECR
+        if: github.event_name != 'pull_request'
+        env:
+          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          IMAGE_TAG: ${{ github.sha }}
+        run: |
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:$IMAGE_TAG
+          docker push $ECR_REGISTRY/${{ env.ECR_REPOSITORY }}:latest

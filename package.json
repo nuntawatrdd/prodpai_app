@@ -1,8 +1,8 @@
 {
-  "name": "plodphai-todo-list",
+  "name": "prodpai_app",
   "version": "1.0.0",
   "private": true,
-  "description": "Plod Phai Cloud demo workload: static Todo List (tests only; no runtime dependencies)",
+  "description": "prod pai Cloud demo workload: static Todo List (tests only; no runtime dependencies)",
   "license": "UNLICENSED",
   "engines": {
     "node": ">=22"
