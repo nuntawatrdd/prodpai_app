@@ -46,9 +46,9 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --bg: #0b1514;
-    --surface: #12201e;
-    --surface-2: #172826;
+    --bg: #0f172a;
+    --surface: #1e293b;
+    --surface-2: #334155;
     --sidebar: #081110;
     --sidebar-text: #d5ece8;
     --sidebar-muted: #8fb5af;
