@@ -4,7 +4,7 @@
   --bg: #f3f7f7;
   --surface: #ffffff;
   --surface-2: #f6faf9;
-  --sidebar: #0f2e2b;
+  --sidebar: #2e0f2c;
   --sidebar-text: #d5ece8;
   --sidebar-muted: #8fb5af;
   --sidebar-hover: rgba(255, 255, 255, 0.07);
@@ -620,7 +620,7 @@ input:focus-visible, select:focus-visible, textarea:focus-visible {
 .toast-error .icon { color: #fca5a5; }
 .toast-info .icon { color: #cbd5e1; }
 .toast.is-leaving { opacity: 0; transform: translateY(6px); }
-@media (prefers-color-scheme: dark) { .toast { background: #e3f1ef; color: #0b1514; } .toast .icon { color: #0f766e; } .toast-error .icon { color: #b91c1c; } .toast-info .icon { color: #475569; } }
+@media (prefers-color-scheme: dark) { .toast { background: #e3f1ef; color: var(--bg); } .toast .icon { color: #0f766e; } .toast-error .icon { color: #b91c1c; } .toast-info .icon { color: #475569; } }
 @keyframes toast-in {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: none; }
